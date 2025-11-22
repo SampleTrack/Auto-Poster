@@ -14,7 +14,7 @@ TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID") # Example: -100123456789 (Must start with -100)
 # Set your timezone (e.g., 'Asia/Kolkata', 'America/New_York', 'UTC')
 TIMEZONE = pytz.timezone('Asia/Kolkata') 
-POST_TIME = "09:00" # The time you want the post to go out (24-hour format)
+POST_TIME = "18:15" # The time you want the post to go out (24-hour format)
 
 # 2. AFFILIATE AD (Appears in every caption)
 AD_TEXT = "📚 Read the book that changed my life"
