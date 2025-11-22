@@ -3,166 +3,185 @@ import logging
 import requests
 import datetime
 import pytz
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 from keep_alive import keep_alive
 
-# 1. LOGGING
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-
-# 2. CONFIGURATION (Loaded from Cloud Dashboard)
+# 1. CONFIGURATION
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-# Default time if not set: 09:00 AM
-DEFAULT_TIME = os.getenv("POST_TIME", "09:00") 
-# Your Timezone (e.g., Asia/Kolkata, UTC, Europe/London)
+DEFAULT_TIME = os.getenv("POST_TIME", "09:00")
 TIMEZONE_STR = os.getenv("TIMEZONE", "Asia/Kolkata")
 
-# 3. AFFILIATE DATA
+# 2. AFFILIATE DATA
 AD_TEXT = "📚 Read this book (40% Off)"
 AD_LINK = "https://amzn.to/your-link"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends the welcome message and help menu."""
-    help_text = (
-        "🤖 **Auto-Motivation Bot Active!**\n\n"
-        "**Commands:**\n"
-        "✅ `/start` - Show this menu\n"
-        "✅ `/help` - How to use the bot\n"
-        "✅ `/post_now` - Force a post immediately\n"
-        "✅ `/set_time HH:MM` - Change daily post time (e.g., /set_time 14:30)\n"
-        "✅ `/set_freq X` - Post X times a day (e.g., /set_freq 3)\n"
-        "✅ `/stop` - Stop all scheduled posts"
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+# 3. SETUP LOGGING (Save to file AND print to console)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot_errors.txt"), # Saves errors to this file
+        logging.StreamHandler() # Prints to Render Console
+    ]
+)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Explains how the bot works."""
-    await update.message.reply_text(
-        "ℹ️ **How it works:**\n"
-        "1. The bot wakes up at your scheduled time.\n"
-        "2. It grabs a random motivational quote.\n"
-        "3. It uses AI to generate a unique image.\n"
-        "4. It posts to your channel with your affiliate link.\n\n"
-        "⚠️ *Note: On Render Free tier, use the Dashboard Variables to set permanent times.*",
-        parse_mode='Markdown'
-    )
+# --- CORE FUNCTIONS ---
 
-async def generate_content(context: ContextTypes.DEFAULT_TYPE):
-    """The worker function that actually generates and posts."""
-    chat_id = context.job.chat_id
-    
+async def get_quote_and_image():
+    """Helper function to fetch data so we don't repeat code."""
     try:
-        # A. Get Quote
+        # Get Quote
         q_response = requests.get("https://zenquotes.io/api/random")
         q_data = q_response.json()[0]
         quote = q_data['q']
         author = q_data['a']
 
-        # B. Generate Image
+        # Generate Image
         prompt = f"epic cinematic scenery, motivational, hyperrealistic, 8k, {quote[:20]}"
         image_url = f"https://image.pollinations.ai/prompt/{prompt}?nologo=true"
 
-        # C. Caption
+        # Create Caption
         caption = (
             f"❝ {quote} ❞\n\n"
             f"~ *{author}*\n\n"
             f"👇 **Start Your Journey:**\n"
             f"[{AD_TEXT}]({AD_LINK})"
         )
+        return image_url, caption
+    except Exception as e:
+        logging.error(f"Error generating content: {e}")
+        return None, None
 
-        # D. Post
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🤖 **Bot Active!**\n\n"
+        "✅ `/post_now` - Preview a post (Review before sending)\n"
+        "✅ `/log` - Download error log file\n"
+        "✅ `/set_time HH:MM` - Set daily schedule\n"
+        "✅ `/stop` - Stop schedule"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+# --- LOGGING COMMAND ---
+
+async def send_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the bot_errors.txt file to the user."""
+    chat_id = update.effective_chat.id
+    try:
+        if os.path.exists("bot_errors.txt"):
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=open("bot_errors.txt", "rb"),
+                filename="bot_errors.txt",
+                caption="📄 Here are your system logs."
+            )
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="✅ Log file is empty or does not exist yet.")
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Could not send logs: {e}")
+
+# --- POSTING LOGIC ---
+
+async def automated_post(context: ContextTypes.DEFAULT_TYPE):
+    """This runs automatically via the scheduler (Direct to Channel)."""
+    logging.info("⏰ Scheduler Triggered. Generating content...")
+    image_url, caption = await get_quote_and_image()
+    
+    if image_url:
+        try:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=image_url,
+                caption=caption,
+                parse_mode='Markdown'
+            )
+            logging.info("✅ Automated post sent to channel.")
+        except Exception as e:
+            logging.error(f"Failed to send automated post: {e}")
+    else:
+        logging.error("Failed to generate content for automated post.")
+
+async def manual_preview_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by /post_now. Sends to ADMIN first with a button."""
+    await update.message.reply_text("🎨 Generating preview... please wait.")
+    
+    image_url, caption = await get_quote_and_image()
+    
+    if image_url:
+        # Create the "Share" button
+        keyboard = [[InlineKeyboardButton("🚀 Share to Channel", callback_data="share_post")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await context.bot.send_photo(
-            chat_id=chat_id,
+            chat_id=update.effective_chat.id,
             photo=image_url,
             caption=caption,
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
-        logging.info("✅ Post sent successfully.")
+        await update.message.reply_text("👆 **Review this.** Click the button above to post it to the channel.")
+    else:
+        await update.message.reply_text("❌ Failed to generate content. Check /log.")
 
-    except Exception as e:
-        logging.error(f"❌ Error sending post: {e}")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Share to Channel' button click."""
+    query = update.callback_query
+    await query.answer() # Stop loading animation
 
-async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual trigger to post immediately."""
-    await update.message.reply_text("🚀 Generating post... please wait 10 seconds.")
-    # We manually create a job object to reuse the logic
-    context.job_queue.run_once(generate_content, when=0, chat_id=CHANNEL_ID)
+    if query.data == "share_post":
+        try:
+            # We copy the message from the Admin Chat -> Public Channel
+            # This is safer/faster than regenerating the image
+            message = query.message
+            
+            # Get the highest quality photo file ID
+            file_id = message.photo[-1].file_id
+            caption = message.caption_markdown  # Use markdown caption
+
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=file_id,
+                caption=caption,
+                parse_mode='Markdown'
+            )
+            
+            await query.edit_message_reply_markup(reply_markup=None) # Remove button
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ **Posted to Channel!**")
+            logging.info("Manual post shared to channel by admin.")
+
+        except Exception as e:
+            logging.error(f"Button share failed: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Error sharing to channel. Check /log.")
+
+# --- SCHEDULING COMMANDS ---
 
 async def set_daily_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sets the daily post time (e.g., /set_time 18:30)."""
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/set_time HH:MM` (24-hour format)")
+        await update.message.reply_text("⚠️ Usage: `/set_time HH:MM`")
         return
-
     time_str = context.args[0]
     try:
-        # Parse time
-        hour, minute = map(int, time_str.split(':'))
+        h, m = map(int, time_str.split(':'))
         tz = pytz.timezone(TIMEZONE_STR)
-        schedule_time = datetime.time(hour=hour, minute=minute, tzinfo=tz)
-
-        # Remove existing jobs to avoid duplicates
-        current_jobs = context.job_queue.get_jobs_by_name(str(CHANNEL_ID))
-        for job in current_jobs:
-            job.schedule_removal()
-
-        # Set new job
-        context.job_queue.run_daily(
-            generate_content, 
-            time=schedule_time, 
-            chat_id=CHANNEL_ID, 
-            name=str(CHANNEL_ID)
-        )
+        schedule_time = datetime.time(hour=h, minute=m, tzinfo=tz)
         
-        await update.message.reply_text(f"✅ Schedule updated! Next post at **{time_str}** ({TIMEZONE_STR}).", parse_mode='Markdown')
+        # Clear old jobs
+        jobs = context.job_queue.get_jobs_by_name(str(CHANNEL_ID))
+        for job in jobs: job.schedule_removal()
 
-    except ValueError:
-        await update.message.reply_text("❌ Invalid format. Use HH:MM (e.g., 14:30).")
-
-async def set_frequency(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates intervals for X posts a day (e.g., /set_freq 4)."""
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/set_freq 3` (for 3 posts a day)")
-        return
-
-    try:
-        count = int(context.args[0])
-        if count < 1 or count > 24:
-            await update.message.reply_text("⚠️ Please choose between 1 and 24 posts per day.")
-            return
-
-        # Calculate seconds between posts (86400 seconds in a day)
-        interval = 86400 / count
-
-        # Remove old jobs
-        current_jobs = context.job_queue.get_jobs_by_name(str(CHANNEL_ID))
-        for job in current_jobs:
-            job.schedule_removal()
-
-        # Set repeating job
-        context.job_queue.run_repeating(
-            generate_content,
-            interval=interval,
-            first=10, # Start first post in 10 seconds
-            chat_id=CHANNEL_ID,
-            name=str(CHANNEL_ID)
-        )
-
-        await update.message.reply_text(f"✅ Frequency set! Posting **{count} times** per day (every {round(interval/3600, 1)} hours).")
-
-    except ValueError:
-        await update.message.reply_text("❌ Please enter a number.")
+        context.job_queue.run_daily(automated_post, time=schedule_time, chat_id=CHANNEL_ID, name=str(CHANNEL_ID))
+        await update.message.reply_text(f"✅ Schedule set for {time_str}")
+    except Exception as e:
+        await update.message.reply_text("❌ Invalid format.")
 
 async def stop_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stops the bot from posting."""
-    current_jobs = context.job_queue.get_jobs_by_name(str(CHANNEL_ID))
-    for job in current_jobs:
-        job.schedule_removal()
-    await update.message.reply_text("🛑 All scheduled posts stopped.")
+    jobs = context.job_queue.get_jobs_by_name(str(CHANNEL_ID))
+    for job in jobs: job.schedule_removal()
+    await update.message.reply_text("🛑 Schedule stopped.")
+
+# --- MAIN RUNNER ---
 
 if __name__ == '__main__':
     if not TOKEN or not CHANNEL_ID:
@@ -170,32 +189,26 @@ if __name__ == '__main__':
     else:
         keep_alive()
         
-        application = ApplicationBuilder().token(TOKEN).build()
+        app = ApplicationBuilder().token(TOKEN).build()
 
-        # Commands
-        application.add_handler(CommandHandler(['start', 'help'], start))
-        application.add_handler(CommandHandler('post_now', post_now))
-        application.add_handler(CommandHandler('set_time', set_daily_time))
-        application.add_handler(CommandHandler('set_freq', set_frequency))
-        application.add_handler(CommandHandler('stop', stop_schedule))
-
-        # Set Default Schedule on Startup
-        job_queue = application.job_queue
+        # Command Handlers
+        app.add_handler(CommandHandler(['start', 'help'], start))
+        app.add_handler(CommandHandler('post_now', manual_preview_post)) # UPDATED
+        app.add_handler(CommandHandler('log', send_logs)) # NEW
+        app.add_handler(CommandHandler('set_time', set_daily_time))
+        app.add_handler(CommandHandler('stop', stop_schedule))
         
-        # Parse Default Time from Environment Variable
+        # Button Handler
+        app.add_handler(CallbackQueryHandler(button_handler))
+
+        # Default Schedule
         try:
             h, m = map(int, DEFAULT_TIME.split(':'))
             tz = pytz.timezone(TIMEZONE_STR)
-            default_time_obj = datetime.time(hour=h, minute=m, tzinfo=tz)
-            
-            job_queue.run_daily(
-                generate_content,
-                time=default_time_obj,
-                chat_id=CHANNEL_ID,
-                name=str(CHANNEL_ID)
-            )
-            print(f"✅ System Online: Scheduled daily post at {DEFAULT_TIME} {TIMEZONE_STR}")
-        except Exception as e:
-            print(f"⚠️ Could not set default schedule: {e}")
+            t_obj = datetime.time(hour=h, minute=m, tzinfo=tz)
+            app.job_queue.run_daily(automated_post, time=t_obj, chat_id=CHANNEL_ID, name=str(CHANNEL_ID))
+            print(f"✅ Bot Online. Schedule: {DEFAULT_TIME}")
+        except:
+            print("⚠️ Default schedule failed (Check Environment Variables)")
 
-        application.run_polling()
+        app.run_polling()
